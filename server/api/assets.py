@@ -1,0 +1,152 @@
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+from server.auth.deps import get_current_user, get_optional_user, require_admin
+from server.core.db import get_db
+from server.core.error import api_error
+from server.core.response import ok, page as page_response
+from server.model.table import User
+from server.schema.type import AssetUpdate, PinUpdate
+from server.service.asset import (
+    assert_public_access,
+    delete_asset,
+    get_asset,
+    list_public_assets,
+    pin_asset,
+    record_asset_event,
+    update_asset_title,
+)
+from server.service.serialize import asset_out
+from server.store.local import storage_path
+
+
+router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+@router.get("")
+def list_assets(
+    page: int = 1,
+    page_size: int = 16,
+    type: str | None = None,
+    db: Session = Depends(get_db),
+):
+    page_number = max(1, page)
+    page_size = min(page_size, 100)
+    assets, total = list_public_assets(db, page_number=page_number, page_size=page_size, asset_type=type)
+    return page_response([asset_out(asset) for asset in assets], page_number, page_size, total)
+
+
+@router.get("/{asset_id}")
+def get_asset_detail(asset_id: int, db: Session = Depends(get_db)):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    return ok(asset_out(asset))
+
+
+@router.get("/{asset_id}/preview")
+def preview_asset(
+    asset_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    record_asset_event(db, asset=asset, event_name="view", user=user, request=request)
+    db.commit()
+    return ok({"url": f"/api/v1/assets/{asset.id}/file", "asset": asset_out(asset)})
+
+
+@router.get("/{asset_id}/download")
+def download_asset(
+    asset_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    record_asset_event(db, asset=asset, event_name="download", user=user, request=request)
+    db.commit()
+    return ok({"url": f"/api/v1/assets/{asset.id}/file?download=1", "asset": asset_out(asset)})
+
+
+@router.get("/{asset_id}/file")
+def asset_file(asset_id: int, download: int = 0, db: Session = Depends(get_db)):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    if not asset.origin_key:
+        raise api_error(404, "file_not_found", "File not found")
+    path = storage_path(asset.origin_key)
+    if not path.exists():
+        raise api_error(404, "file_not_found", "File not found")
+    return FileResponse(
+        path,
+        media_type=asset.mime,
+        filename=asset.original_filename if download else None,
+    )
+
+
+@router.get("/{asset_id}/thumb")
+def asset_thumb(asset_id: int, db: Session = Depends(get_db)):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    key = asset.thumb_key or asset.origin_key
+    if not key:
+        raise api_error(404, "file_not_found", "File not found")
+    path = storage_path(key)
+    if not path.exists():
+        raise api_error(404, "file_not_found", "File not found")
+    return FileResponse(path)
+
+
+@router.get("/{asset_id}/poster")
+def asset_poster(asset_id: int, db: Session = Depends(get_db)):
+    asset = get_asset(db, asset_id)
+    assert_public_access(asset)
+    if not asset.poster_key:
+        raise api_error(404, "file_not_found", "File not found")
+    path = storage_path(asset.poster_key)
+    if not path.exists():
+        raise api_error(404, "file_not_found", "File not found")
+    return FileResponse(path)
+
+
+@router.patch("/{asset_id}")
+def patch_asset(
+    asset_id: int,
+    payload: AssetUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    asset = get_asset(db, asset_id)
+    update_asset_title(user, asset, payload.title)
+    db.commit()
+    return ok(asset_out(asset))
+
+
+@router.delete("/{asset_id}")
+def remove_asset(
+    asset_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    asset = get_asset(db, asset_id)
+    delete_asset(db, user, asset, request)
+    db.commit()
+    return ok({"success": True})
+
+
+@router.patch("/{asset_id}/pin")
+def patch_pin(
+    asset_id: int,
+    payload: PinUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    asset = get_asset(db, asset_id)
+    pin_asset(user, asset, payload.pinned, db, request)
+    db.commit()
+    return ok(asset_out(asset))
