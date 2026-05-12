@@ -53,7 +53,7 @@ def storage_out(storage: Storage) -> dict:
 
 def asset_out(asset: Asset, include_owner: bool = True) -> dict:
     url = f"/api/v1/assets/{asset.id}/file"
-    thumb_url = f"/api/v1/assets/{asset.id}/thumb" if asset.thumb_key else url
+    thumb_url = f"/api/v1/assets/{asset.id}/thumb" if asset.type == "image" else None
     poster_url = f"/api/v1/assets/{asset.id}/poster" if asset.poster_key else None
     return {
         "id": asset.id,
@@ -88,5 +88,6 @@ def log_out(log: Log) -> dict:
         "target_type": log.target_type,
         "target_id": log.target_id,
         "message": log.message,
+        "ip": log.ip,
         "created_at": log.created_at,
     }

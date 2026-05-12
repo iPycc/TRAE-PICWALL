@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     host: str = "0.0.0.0"
     port: int = 1309
-    database_url: str = "sqlite:///./picwall.db"
+    database_url: str = "mysql+pymysql://root:341001@127.0.0.1:3306/picwall?charset=utf8mb4"
     jwt_secret: str = "change-me-in-production-with-at-least-32-bytes"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 15

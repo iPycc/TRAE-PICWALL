@@ -120,6 +120,7 @@ def assets(
     owner_uid: str | None = None,
     type: str | None = None,
     status: str | None = None,
+    q: str | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
@@ -134,6 +135,11 @@ def assets(
         stmt = stmt.where(Asset.type == type)
     if status:
         stmt = stmt.where(Asset.status == status)
+    if q:
+        keyword = f"%{q.strip()}%"
+        stmt = stmt.where(
+            Asset.title.ilike(keyword) | Asset.original_filename.ilike(keyword)
+        )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     page_number = max(1, page)
     rows = db.scalars(stmt.order_by(Asset.created_at.desc()).offset((page_number - 1) * page_size).limit(page_size)).all()

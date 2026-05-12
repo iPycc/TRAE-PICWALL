@@ -31,11 +31,45 @@ def _try_image(asset: Asset) -> None:
     with Image.open(src) as img:
         img = ImageOps.exif_transpose(img)
         asset.width, asset.height = img.size
-        img.thumbnail((1200, 1200))
-        thumb_key = f"thumb/{asset.id}.webp"
-        thumb_path = storage_path(thumb_key)
-        img.save(thumb_path, "WEBP", quality=82, method=6)
-        asset.thumb_key = thumb_key
+
+
+def ensure_thumbnail(asset: Asset, *, max_size: int = 360, quality: int = 72) -> Path:
+    if asset.type != "image" or not asset.origin_key:
+        raise FileNotFoundError("Source image not found")
+    if asset.thumb_key:
+        existing = storage_path(asset.thumb_key)
+        if existing.exists():
+            return existing
+
+    try:
+        from PIL import Image, ImageOps
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Pillow is required to generate thumbnails") from exc
+
+    src = storage_path(asset.origin_key)
+    if not src.exists():
+        raise FileNotFoundError("Source image not found")
+
+    thumb_key = f"thumb/{asset.id}.webp"
+    thumb_path = storage_path(thumb_key)
+    with Image.open(src) as img:
+        img.draft("RGB", (max_size * 2, max_size * 2))
+        img = ImageOps.exif_transpose(img)
+        asset.width, asset.height = img.size
+        img.thumbnail((max_size, max_size))
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(thumb_path, "WEBP", quality=quality, method=0)
+    asset.thumb_key = thumb_key
+    return thumb_path
+
+
+def _try_thumbnail(asset: Asset) -> None:
+    try:
+        ensure_thumbnail(asset)
+    except Exception:
+        return
 
 
 def _try_video(asset: Asset) -> None:
@@ -80,6 +114,7 @@ def process_asset(db: Session, asset: Asset) -> None:
     try:
         if asset.type == "image":
             _try_image(asset)
+            _try_thumbnail(asset)
         elif asset.type == "video":
             _try_video(asset)
         asset.status = "ready"

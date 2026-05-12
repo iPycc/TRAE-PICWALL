@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 Role = Literal["root", "admin", "user"]
 AssetType = Literal["image", "video"]
-AssetStatus = Literal["waiting", "hashing", "uploading", "uploaded", "processing", "ready", "failed"]
+AssetStatus = Literal["waiting", "uploading", "uploaded", "processing", "ready", "failed"]
 StorageType = Literal["cos", "local"]
 
 
@@ -72,6 +72,7 @@ class LogOut(BaseModel):
     target_type: str
     target_id: str
     message: str
+    ip: str | None = None
     created_at: datetime
 
 
@@ -128,32 +129,12 @@ class PinUpdate(BaseModel):
     pinned: bool
 
 
-class UploadCheckIn(BaseModel):
-    hash: str = Field(min_length=1, max_length=128)
-    size: int = Field(ge=1)
-    mime: str = Field(min_length=1, max_length=100)
-    filename: str = Field(min_length=1, max_length=255)
-    title: str | None = Field(default=None, max_length=160)
-    type: AssetType | None = None
-
-
 class UploadCreateIn(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     title: str | None = Field(default=None, max_length=160)
-    hash: str = Field(min_length=1, max_length=128)
     size: int = Field(ge=1)
     mime: str = Field(min_length=1, max_length=100)
     type: AssetType
-
-
-class UploadCreateOut(BaseModel):
-    upload_id: str
-    asset_id: int
-    storage_type: StorageType
-    multipart: bool
-    part_size: int
-    concurrency: int
-    upload_urls: list[str] = []
 
 
 class UploadCompletePart(BaseModel):
@@ -163,6 +144,12 @@ class UploadCompletePart(BaseModel):
 
 class UploadCompleteIn(BaseModel):
     parts: list[UploadCompletePart] = []
+
+
+class UploadBatchLogIn(BaseModel):
+    asset_ids: list[int] = []
+    failed_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
 
 
 class StorageCreateIn(BaseModel):
@@ -207,4 +194,3 @@ class UserStatsOut(BaseModel):
     video_count: int
     view_count: int
     download_count: int
-

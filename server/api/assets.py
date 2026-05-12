@@ -18,6 +18,7 @@ from server.service.asset import (
 )
 from server.service.serialize import asset_out
 from server.store.local import storage_path
+from server.task.media import ensure_thumbnail
 
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -28,11 +29,18 @@ def list_assets(
     page: int = 1,
     page_size: int = 16,
     type: str | None = None,
+    q: str | None = None,
     db: Session = Depends(get_db),
 ):
     page_number = max(1, page)
     page_size = min(page_size, 100)
-    assets, total = list_public_assets(db, page_number=page_number, page_size=page_size, asset_type=type)
+    assets, total = list_public_assets(
+        db,
+        page_number=page_number,
+        page_size=page_size,
+        asset_type=type,
+        q=q,
+    )
     return page_response([asset_out(asset) for asset in assets], page_number, page_size, total)
 
 
@@ -91,13 +99,14 @@ def asset_file(asset_id: int, download: int = 0, db: Session = Depends(get_db)):
 def asset_thumb(asset_id: int, db: Session = Depends(get_db)):
     asset = get_asset(db, asset_id)
     assert_public_access(asset)
-    key = asset.thumb_key or asset.origin_key
-    if not key:
+    if asset.type != "image":
+        raise api_error(404, "thumb_not_found", "Thumbnail not found")
+    try:
+        path = ensure_thumbnail(asset)
+        db.commit()
+    except FileNotFoundError:
         raise api_error(404, "file_not_found", "File not found")
-    path = storage_path(key)
-    if not path.exists():
-        raise api_error(404, "file_not_found", "File not found")
-    return FileResponse(path)
+    return FileResponse(path, media_type="image/webp")
 
 
 @router.get("/{asset_id}/poster")

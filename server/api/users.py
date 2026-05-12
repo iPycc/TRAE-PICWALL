@@ -97,12 +97,18 @@ def my_assets(
     page: int = 1,
     page_size: int = 16,
     storage_id: int | None = None,
+    q: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     stmt = select(Asset).options(joinedload(Asset.user)).where(Asset.user_id == user.id)
     if storage_id:
         stmt = stmt.where(Asset.storage_id == storage_id)
+    if q:
+        keyword = f"%{q.strip()}%"
+        stmt = stmt.where(
+            Asset.title.ilike(keyword) | Asset.original_filename.ilike(keyword)
+        )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     page_number = max(1, page)
     assets = db.scalars(stmt.order_by(Asset.created_at.desc()).offset((page_number - 1) * page_size).limit(page_size)).all()

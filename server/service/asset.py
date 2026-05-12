@@ -9,7 +9,14 @@ from server.service.storage import active_storage
 from server.store.local import remove_key
 
 
-def list_public_assets(db: Session, *, page_number: int, page_size: int, asset_type: str | None) -> tuple[list[Asset], int]:
+def list_public_assets(
+    db: Session,
+    *,
+    page_number: int,
+    page_size: int,
+    asset_type: str | None,
+    q: str | None = None,
+) -> tuple[list[Asset], int]:
     storage = active_storage(db)
     stmt = (
         select(Asset)
@@ -18,6 +25,11 @@ def list_public_assets(db: Session, *, page_number: int, page_size: int, asset_t
     )
     if asset_type:
         stmt = stmt.where(Asset.type == asset_type)
+    if q:
+        keyword = f"%{q.strip()}%"
+        stmt = stmt.where(
+            Asset.title.ilike(keyword) | Asset.original_filename.ilike(keyword)
+        )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     assets = db.scalars(
         stmt.order_by(Asset.is_pinned.desc(), Asset.created_at.desc())
@@ -103,4 +115,3 @@ def pin_asset(actor: User, asset: Asset, pinned: bool, db: Session, request: Req
         raise api_error(403, "forbidden", "Admin permission required")
     asset.is_pinned = pinned
     write_log(db, actor=actor, action="pin", target_type="asset", target_id=asset.id, request=request)
-
