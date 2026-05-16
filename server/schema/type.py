@@ -36,6 +36,7 @@ class StorageOut(BaseModel):
     endpoint: str | None = None
     path_prefix: str = ""
     local_path: str | None = None
+    secret_configured: bool = False
     is_active: bool
     is_disabled: bool
     created_at: datetime
@@ -177,6 +178,12 @@ class StorageUpdateIn(BaseModel):
 
 class StorageActivationIn(BaseModel):
     active: bool
+
+
+class StorageThumbnailIn(BaseModel):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=24, ge=1, le=100)
+    force: bool = False
 
 
 class DashboardOut(BaseModel):

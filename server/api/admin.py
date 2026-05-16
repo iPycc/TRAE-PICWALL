@@ -6,11 +6,18 @@ from server.core.db import get_db
 from server.core.error import api_error
 from server.core.response import ok, page as page_response
 from server.model.table import Asset, Log, Storage, User
-from server.schema.type import RoleUpdate, StorageActivationIn, StorageCreateIn, StorageUpdateIn
+from server.schema.type import RoleUpdate, StorageActivationIn, StorageCreateIn, StorageThumbnailIn, StorageUpdateIn
 from server.service.asset import delete_asset
 from server.service.log import write_log
 from server.service.serialize import asset_out, log_out, storage_out, user_out
-from server.service.storage import activate_storage, create_storage, update_storage
+from server.service.storage import (
+    activate_storage,
+    configure_storage_cors,
+    cos_storage_objects,
+    create_storage,
+    generate_storage_thumbnails,
+    update_storage,
+)
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -160,6 +167,7 @@ def add_storage(
     actor: User = Depends(require_admin),
 ):
     storage = create_storage(db, payload)
+    configure_storage_cors(storage, request.headers.get("origin"))
     write_log(db, actor=actor, action="storage_create", target_type="storage", target_id=storage.id, request=request)
     db.commit()
     return ok(storage_out(storage))
@@ -177,13 +185,16 @@ def storage_detail(storage_id: int, db: Session = Depends(get_db), _: User = Dep
 def patch_storage(
     storage_id: int,
     payload: StorageUpdateIn,
+    request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    actor: User = Depends(require_admin),
 ):
     storage = db.get(Storage, storage_id)
     if storage is None:
         raise api_error(404, "storage_not_found", "Storage not found")
     update_storage(storage, payload)
+    configure_storage_cors(storage, request.headers.get("origin"))
+    write_log(db, actor=actor, action="storage_update", target_type="storage", target_id=storage.id, request=request)
     db.commit()
     return ok(storage_out(storage))
 
@@ -201,9 +212,50 @@ def storage_activation(
         raise api_error(404, "storage_not_found", "Storage not found")
     if payload.active:
         activate_storage(db, storage)
+        configure_storage_cors(storage, request.headers.get("origin"))
         write_log(db, actor=actor, action="storage_switch", target_type="storage", target_id=storage.id, request=request)
     db.commit()
     return ok(storage_out(storage))
+
+
+@router.get("/storages/{storage_id}/objects")
+def storage_objects(
+    storage_id: int,
+    prefix: str = "",
+    marker: str = "",
+    max_keys: int = 100,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    storage = db.get(Storage, storage_id)
+    if storage is None:
+        raise api_error(404, "storage_not_found", "Storage not found")
+    return ok(cos_storage_objects(storage, prefix=prefix, marker=marker, max_keys=max_keys))
+
+
+@router.post("/storages/{storage_id}/thumbnails")
+def storage_thumbnails(
+    storage_id: int,
+    payload: StorageThumbnailIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_admin),
+):
+    storage = db.get(Storage, storage_id)
+    if storage is None:
+        raise api_error(404, "storage_not_found", "Storage not found")
+    result = generate_storage_thumbnails(db, storage, payload)
+    write_log(
+        db,
+        actor=actor,
+        action="storage_thumbnails",
+        target_type="storage",
+        target_id=storage.id,
+        message=f"Generated {result['processed']} thumbnails, failed {result['failed_count']}.",
+        request=request,
+    )
+    db.commit()
+    return ok(result)
 
 
 @router.delete("/storages/{storage_id}")
@@ -216,12 +268,17 @@ def disable_storage(
     storage = db.get(Storage, storage_id)
     if storage is None:
         raise api_error(404, "storage_not_found", "Storage not found")
+    if storage.type == "local":
+        raise api_error(400, "local_storage_protected", "Local storage cannot be deleted")
     if storage.is_active:
-        raise api_error(400, "storage_active", "Active storage cannot be disabled")
-    storage.is_disabled = True
-    write_log(db, actor=actor, action="storage_disable", target_type="storage", target_id=storage.id, request=request)
+        raise api_error(400, "storage_active", "Active storage cannot be deleted")
+    asset_count = db.scalar(select(func.count(Asset.id)).where(Asset.storage_id == storage.id)) or 0
+    if asset_count > 0:
+        raise api_error(400, "storage_not_empty", "Storage has assets and cannot be deleted")
+    write_log(db, actor=actor, action="storage_delete", target_type="storage", target_id=storage.id, request=request)
+    db.delete(storage)
     db.commit()
-    return ok(storage_out(storage))
+    return ok({"success": True})
 
 
 @router.get("/logs")

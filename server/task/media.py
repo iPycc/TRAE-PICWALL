@@ -3,6 +3,7 @@ import subprocess
 import shutil
 from sqlalchemy.orm import Session
 from server.model.table import Asset
+from server.store.cos import generate_image_thumbnail
 from server.store.local import storage_path
 
 
@@ -112,6 +113,9 @@ def process_asset(db: Session, asset: Asset) -> None:
     asset.status = "processing"
     db.flush()
     try:
+        if asset.storage and asset.storage.type == "cos":
+            asset.status = "ready"
+            return
         if asset.type == "image":
             _try_image(asset)
             _try_thumbnail(asset)

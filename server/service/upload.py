@@ -1,3 +1,5 @@
+import re
+from os import path
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,11 +9,19 @@ from sqlalchemy.orm import Session, joinedload
 
 from server.core.config import get_settings
 from server.core.error import api_error
-from server.model.table import Asset, Upload, UploadPart, User
+from server.model.table import Asset, Storage, Upload, UploadPart, User
 from server.schema.type import UploadCompleteIn, UploadCreateIn
 from server.service.asset import keep_extension
 from server.service.log import write_log
 from server.service.storage import active_storage
+from server.store.cos import (
+    abort_multipart_upload,
+    complete_multipart_upload,
+    cos_key,
+    create_multipart_upload,
+    get_presigned_url,
+    head_object,
+)
 from server.store.local import append_files, save_upload, storage_path
 from server.task.media import process_asset
 
@@ -65,8 +75,6 @@ def create_asset_from_payload(
 def create_upload(db: Session, payload: UploadCreateIn, user: User, request: Request) -> dict:
     settings = get_settings()
     storage = active_storage(db)
-    if storage.type != "local":
-        raise api_error(501, "cos_not_implemented", "COS signing is not configured in this local build")
     asset_type = payload.type
     validate_media(payload.filename, payload.mime, asset_type)
     asset = create_asset_from_payload(db, payload, user)
@@ -84,6 +92,41 @@ def create_upload(db: Session, payload: UploadCreateIn, user: User, request: Req
         total_parts=total_parts,
     )
     db.add(upload)
+    upload_urls: list[str] = []
+    if storage.type == "cos":
+        raw_name = path.basename(payload.filename).strip() or f"{asset.id}.{asset.extension}"
+        safe_name = re.sub(r"[\\/]+", "_", raw_name)
+        safe_name = re.sub(r"[\s]+", "_", safe_name)
+        safe_name = re.sub(r"[^\w.\-()+\[\]_]+", "_", safe_name, flags=re.UNICODE)
+        safe_name = safe_name.strip("._-") or f"{asset.id}.{asset.extension}"
+        ext = f".{asset.extension}".lower()
+        if not safe_name.lower().endswith(ext):
+            safe_name = f"{Path(safe_name).stem}{ext}"
+        safe_name = safe_name[:120]
+        origin_key = cos_key(storage, f"{uuid4().hex[:4]}-{safe_name}")
+        asset.origin_key = origin_key
+        if multipart:
+            cos_upload_id = create_multipart_upload(storage, origin_key)
+            db.add(UploadPart(upload=upload, part_number=0, etag=cos_upload_id, size=0))
+            upload_urls = [
+                get_presigned_url(
+                    storage,
+                    method="PUT",
+                    key=origin_key,
+                    params={"partNumber": str(part_number), "uploadId": cos_upload_id},
+                    expired=max(settings.cos_signed_url_seconds, 3600),
+                )
+                for part_number in range(1, total_parts + 1)
+            ]
+        else:
+            upload_urls = [
+                get_presigned_url(
+                    storage,
+                    method="PUT",
+                    key=origin_key,
+                    expired=max(settings.cos_signed_url_seconds, 3600),
+                )
+            ]
     db.commit()
     return {
         "upload_id": upload_id,
@@ -92,7 +135,7 @@ def create_upload(db: Session, payload: UploadCreateIn, user: User, request: Req
         "multipart": multipart,
         "part_size": settings.part_size,
         "concurrency": 4 if asset_type == "image" else 2,
-        "upload_urls": [],
+        "upload_urls": upload_urls,
     }
 
 
@@ -111,6 +154,9 @@ def get_upload(db: Session, upload_id: str, user: User) -> Upload:
 
 async def receive_part(db: Session, upload_id: str, part_number: int, file: FastUploadFile, user: User) -> dict:
     upload = get_upload(db, upload_id, user)
+    storage = db.get(Storage, upload.storage_id)
+    if storage and storage.type == "cos":
+        raise api_error(400, "cos_direct_upload", "COS uploads must use signed URLs")
     if upload.status in ("completed", "canceled"):
         raise api_error(400, "upload_closed", "Upload is closed")
     upload.status = "uploading"
@@ -132,6 +178,55 @@ async def receive_part(db: Session, upload_id: str, part_number: int, file: Fast
 def complete_upload(db: Session, upload_id: str, payload: UploadCompleteIn, user: User, request: Request) -> Asset:
     upload = get_upload(db, upload_id, user)
     asset = upload.asset
+    storage = db.get(Storage, upload.storage_id)
+    if storage is None:
+        raise api_error(404, "storage_not_found", "Storage not found")
+    if storage.type == "cos":
+        if not asset.origin_key:
+            raise api_error(400, "cos_key_missing", "COS object key is missing")
+        upload.status = "uploading"
+        asset.status = "uploading"
+        if upload.multipart:
+            marker = db.scalar(
+                select(UploadPart).where(UploadPart.upload_id == upload.id, UploadPart.part_number == 0)
+            )
+            if marker is None:
+                raise api_error(400, "cos_upload_id_missing", "COS UploadId is missing")
+            parts = []
+            for part in sorted(payload.parts, key=lambda item: item.part_number):
+                if not part.etag:
+                    raise api_error(400, "etag_missing", "COS multipart ETag is missing")
+                parts.append({"PartNumber": part.part_number, "ETag": part.etag})
+            if len(parts) < upload.total_parts:
+                raise api_error(400, "parts_missing", "Not all parts were uploaded")
+            complete_multipart_upload(
+                storage,
+                key=asset.origin_key,
+                upload_id=marker.etag,
+                parts=parts,
+            )
+        else:
+            head_object(storage, asset.origin_key)
+        upload.uploaded_parts = upload.total_parts
+        asset.status = "uploaded"
+        upload.status = "completed"
+        try:
+            process_asset(db, asset)
+        except Exception as exc:
+            write_log(
+                db,
+                actor=user,
+                action="upload_failed",
+                target_type="asset",
+                target_id=asset.id,
+                message=str(exc),
+                request=request,
+            )
+            raise
+        write_log(db, actor=user, action="upload", target_type="asset", target_id=asset.id, request=request)
+        db.commit()
+        return asset
+
     if upload.multipart:
         parts = db.scalars(
             select(UploadPart).where(UploadPart.upload_id == upload.id).order_by(UploadPart.part_number.asc())
@@ -171,6 +266,11 @@ def complete_upload(db: Session, upload_id: str, payload: UploadCompleteIn, user
 
 def cancel_upload(db: Session, upload_id: str, user: User) -> None:
     upload = get_upload(db, upload_id, user)
+    storage = db.get(Storage, upload.storage_id)
+    if storage and storage.type == "cos" and upload.asset.origin_key:
+        marker = db.scalar(select(UploadPart).where(UploadPart.upload_id == upload.id, UploadPart.part_number == 0))
+        if marker is not None:
+            abort_multipart_upload(storage, key=upload.asset.origin_key, upload_id=marker.etag)
     upload.status = "canceled"
     upload.asset.status = "failed"
     db.commit()

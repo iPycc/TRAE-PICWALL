@@ -1,11 +1,12 @@
 from pathlib import Path
 from fastapi import Request
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, joinedload
 from server.core.error import api_error
 from server.model.table import Asset, AssetEvent, Event, User
 from server.service.log import write_log
 from server.service.storage import active_storage
+from server.store.cos import delete_keys
 from server.store.local import remove_key
 
 
@@ -90,9 +91,13 @@ def delete_asset(db: Session, actor: User, asset: Asset, request: Request) -> No
     if not can_delete_asset(actor, asset):
         raise api_error(403, "forbidden", "Cannot delete this asset")
     write_log(db, actor=actor, action="delete", target_type="asset", target_id=asset.id, request=request)
-    remove_key(asset.origin_key)
-    remove_key(asset.thumb_key)
-    remove_key(asset.poster_key)
+    db.execute(delete(AssetEvent).where(AssetEvent.asset_id == asset.id))
+    if asset.storage and asset.storage.type == "cos":
+        delete_keys(asset.storage, [asset.origin_key, asset.thumb_key, asset.poster_key])
+    else:
+        remove_key(asset.origin_key)
+        remove_key(asset.thumb_key)
+        remove_key(asset.poster_key)
     db.delete(asset)
 
 
